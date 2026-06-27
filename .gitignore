@@ -1,0 +1,7 @@
+TableDrop/
+*.xcodeproj/*
+!*.xcodeproj/project.pbxproj
+!*.xcodeproj/xcshareddata/
+build/
+DerivedData/
+.DS_Store

@@ -2,7 +2,7 @@ import AppKit
 import SwiftUI
 
 @main
-struct BQCSVUploaderApp: App {
+struct TableDropApp: App {
     var body: some Scene {
         WindowGroup {
             ContentView()

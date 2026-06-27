@@ -103,7 +103,7 @@ struct ContentView: View {
         VStack(alignment: .leading, spacing: 8) {
             if let uploadResult {
                 if uploadResult.succeeded {
-                    Text("🟢 Table was uploaded successfully.")
+                    Text("🟢 Your upload was successful.")
                         .font(.caption)
                         .foregroundStyle(.secondary)
                 } else {

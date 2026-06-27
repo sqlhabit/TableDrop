@@ -1,5 +1,7 @@
 # Table Drop
 
+<img src="https://github.com/makaroni4/TableDrop/blob/main/screenshot.png" width="700">
+
 A lightweight macOS app for uploading CSV files to BigQuery.
 
 Behind the scenes, the app uses [`bqcsv`](https://github.com/makaroni4/bqcsv) to upload a CSV file.

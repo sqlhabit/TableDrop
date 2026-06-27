@@ -94,6 +94,7 @@
 				BuildIndependentTargetsInParallel = 1;
 				LastSwiftUpdateCheck = 1500;
 				LastUpgradeCheck = 1500;
+				ORGANIZATIONNAME = "";
 				TargetAttributes = {
 					A10000050000000000000001 = {
 						CreatedOnToolsVersion = 15.0;

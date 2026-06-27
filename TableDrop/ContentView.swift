@@ -15,6 +15,7 @@ struct ContentView: View {
     @Environment(\.scenePhase) private var scenePhase
     @State private var tableReference = AppSettings.tableReference
     @State private var selectedFileURL: URL?
+    @State private var securityScopedFileURL: URL?
     @State private var isTargeted = false
     @State private var isUploading = false
     @State private var statusMessage = ""
@@ -212,8 +213,26 @@ struct ContentView: View {
             return
         }
 
+        beginSecurityScopedAccess(for: url)
         selectedFileURL = url
         startUpload()
+    }
+
+    private func beginSecurityScopedAccess(for url: URL) {
+        if let securityScopedFileURL {
+            securityScopedFileURL.stopAccessingSecurityScopedResource()
+            self.securityScopedFileURL = nil
+        }
+        if url.startAccessingSecurityScopedResource() {
+            securityScopedFileURL = url
+        }
+    }
+
+    private func endSecurityScopedAccess() {
+        if let securityScopedFileURL {
+            securityScopedFileURL.stopAccessingSecurityScopedResource()
+            self.securityScopedFileURL = nil
+        }
     }
 
     private func startUpload() {
@@ -235,6 +254,7 @@ struct ContentView: View {
                     statusMessage = ""
                     isUploading = false
                     selectedFileURL = nil
+                    endSecurityScopedAccess()
                 }
             } catch {
                 await MainActor.run {
@@ -246,6 +266,7 @@ struct ContentView: View {
                     statusIsError = false
                     isUploading = false
                     selectedFileURL = nil
+                    endSecurityScopedAccess()
                 }
             }
         }

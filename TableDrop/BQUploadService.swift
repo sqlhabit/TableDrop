@@ -31,21 +31,180 @@ struct BQUploadService {
     }
 
     private struct UploadCommand {
-        let executable: String
+        let cliName: String
+        let pathEnvironmentKeys: [String]
         let prefixArguments: [String]
     }
 
+    private static let shell = "/bin/zsh"
     private static let devUploadModule = "src.cli"
+    private static let googleCloudSDKPattern = #"['"]([^'"]+/google-cloud-sdk)/path\.(?:zsh|bash)\.inc['"]"#
+    private static var cachedToolEnvironment: [String: String]?
+
+    private static func shellQuote(_ argument: String) -> String {
+        guard !argument.isEmpty else { return "''" }
+        return "'" + argument.replacingOccurrences(of: "'", with: "'\\''") + "'"
+    }
+
+    private static func directoryContainingExecutable(at path: String) -> String? {
+        let trimmed = path.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else { return nil }
+        return (trimmed as NSString).deletingLastPathComponent
+    }
+
+    private static func shellConfigBinDirectories() -> [String] {
+        let home = FileManager.default.homeDirectoryForCurrentUser.path
+        let configFiles = [".zprofile", ".zshrc", ".bash_profile", ".bashrc"]
+        var directories: [String] = []
+
+        guard let regex = try? NSRegularExpression(pattern: googleCloudSDKPattern) else {
+            return directories
+        }
+
+        for file in configFiles {
+            let configPath = "\(home)/\(file)"
+            guard let content = try? String(contentsOfFile: configPath, encoding: .utf8) else {
+                continue
+            }
+
+            let range = NSRange(content.startIndex..<content.endIndex, in: content)
+            regex.enumerateMatches(in: content, range: range) { match, _, _ in
+                guard let match,
+                      let sdkRange = Range(match.range(at: 1), in: content) else {
+                    return
+                }
+                directories.append("\(content[sdkRange])/bin")
+            }
+        }
+
+        return directories
+    }
+
+    private static func toolSearchPath() -> String {
+        let home = FileManager.default.homeDirectoryForCurrentUser.path
+        var directories: [String] = []
+
+        func append(_ path: String?) {
+            guard let path,
+                  !path.isEmpty,
+                  !directories.contains(path) else {
+                return
+            }
+            directories.append(path)
+        }
+
+        for key in ["BQ_PATH", "BQCSV_PATH", "PYTHON_PATH", "BQCSV_PYTHON"] {
+            if let configuredPath = ProcessInfo.processInfo.environment[key] {
+                append(directoryContainingExecutable(at: configuredPath))
+            }
+        }
+
+        append("\(home)/.pyenv/shims")
+        append("/opt/homebrew/bin")
+        append("/usr/local/bin")
+        append("\(home)/google-cloud-sdk/bin")
+
+        for directory in shellConfigBinDirectories() {
+            append(directory)
+        }
+
+        let inheritedPath = ProcessInfo.processInfo.environment["PATH"] ?? "/usr/bin:/bin:/usr/sbin:/sbin"
+        for directory in inheritedPath.split(separator: ":", omittingEmptySubsequences: true) {
+            append(String(directory))
+        }
+
+        return directories.joined(separator: ":")
+    }
+
+    private static func toolEnvironment(extra: [String: String] = [:]) -> [String: String] {
+        if extra.isEmpty, let cachedToolEnvironment {
+            return cachedToolEnvironment
+        }
+
+        var environment = ProcessInfo.processInfo.environment
+        environment["PATH"] = toolSearchPath()
+        for (key, value) in extra {
+            environment[key] = value
+        }
+
+        if extra.isEmpty {
+            cachedToolEnvironment = environment
+        }
+
+        return environment
+    }
+
+    private static func runShell(
+        _ script: String,
+        environment: [String: String]
+    ) throws -> (status: Int32, output: String) {
+        let process = Process()
+        process.executableURL = URL(fileURLWithPath: shell)
+        process.arguments = ["-c", script]
+        process.environment = environment
+
+        let outputPipe = Pipe()
+        let errorPipe = Pipe()
+        process.standardOutput = outputPipe
+        process.standardError = errorPipe
+
+        try process.run()
+        process.waitUntilExit()
+
+        let stdout = String(data: outputPipe.fileHandleForReading.readDataToEndOfFile(), encoding: .utf8) ?? ""
+        let stderr = String(data: errorPipe.fileHandleForReading.readDataToEndOfFile(), encoding: .utf8) ?? ""
+        let trimmedStdout = stdout.trimmingCharacters(in: .whitespacesAndNewlines)
+        let trimmedStderr = stderr.trimmingCharacters(in: .whitespacesAndNewlines)
+        let combined = trimmedStdout.isEmpty
+            ? trimmedStderr
+            : [trimmedStdout, trimmedStderr].filter { !$0.isEmpty }.joined(separator: "\n")
+
+        return (process.terminationStatus, combined)
+    }
+
+    private static func cliCommand(name: String, pathEnvironmentKeys: [String]) -> String {
+        for key in pathEnvironmentKeys {
+            if let path = ProcessInfo.processInfo.environment[key]?
+                .trimmingCharacters(in: .whitespacesAndNewlines),
+               !path.isEmpty {
+                return path
+            }
+        }
+        return name
+    }
+
+    private static func resolveUploadCommand(environment: inout [String: String]) -> UploadCommand {
+        #if DEBUG
+        if let devUploadRepoPath = resolveDevUploadRepoPath() {
+            let existingPythonPath = environment["PYTHONPATH"] ?? ""
+            environment["PYTHONPATH"] = existingPythonPath.isEmpty
+                ? devUploadRepoPath
+                : "\(devUploadRepoPath):\(existingPythonPath)"
+
+            return UploadCommand(
+                cliName: "python3",
+                pathEnvironmentKeys: ["PYTHON_PATH", "BQCSV_PYTHON"],
+                prefixArguments: ["-m", devUploadModule]
+            )
+        }
+        #endif
+
+        return UploadCommand(cliName: "bqcsv", pathEnvironmentKeys: ["BQCSV_PATH"], prefixArguments: [])
+    }
 
     #if DEBUG
     private static func resolveDevUploadRepoPath() -> String? {
         guard let path = ProcessInfo.processInfo.environment["BQCSV_DEV_REPO"]?
             .trimmingCharacters(in: .whitespacesAndNewlines),
-              !path.isEmpty,
-              FileManager.default.isReadableFile(atPath: "\(path)/src/cli.py")
-        else {
+              !path.isEmpty else {
             return nil
         }
+
+        let cliPath = "\(path)/src/cli.py"
+        guard FileManager.default.fileExists(atPath: cliPath) else {
+            return nil
+        }
+
         return path
     }
     #endif
@@ -83,160 +242,40 @@ struct BQUploadService {
         )
     }
 
-    static func findUploadExecutable() -> String? {
-        let candidates = [
-            ProcessInfo.processInfo.environment["BQCSV_PATH"],
-            "\(NSHomeDirectory())/.pyenv/shims/bqcsv",
-            "/opt/homebrew/bin/bqcsv",
-            "/usr/local/bin/bqcsv",
-        ].compactMap { $0 }
-
-        for path in candidates {
-            if FileManager.default.isExecutableFile(atPath: path) {
-                return path
-            }
-        }
-
-        return resolveFromPATH(executable: "bqcsv")
+    private static func uploadCommandInvocation(_ uploadCommand: UploadCommand) -> String {
+        let command = cliCommand(
+            name: uploadCommand.cliName,
+            pathEnvironmentKeys: uploadCommand.pathEnvironmentKeys
+        )
+        return ([command] + uploadCommand.prefixArguments).map(shellQuote).joined(separator: " ")
     }
 
-    static func findPythonExecutable() -> String? {
-        let candidates = [
-            ProcessInfo.processInfo.environment["PYTHON_PATH"],
-            ProcessInfo.processInfo.environment["BQCSV_PYTHON"],
-            "\(NSHomeDirectory())/.pyenv/shims/python3",
-            "/opt/homebrew/bin/python3",
-            "/usr/local/bin/python3",
-        ].compactMap { $0 }
+    private static func buildUploadScript(
+        csvURL: URL,
+        components: TableComponents,
+        uploadCommand: UploadCommand
+    ) -> String {
+        let uploadCLI = uploadCommandInvocation(uploadCommand)
+        let csvPath = shellQuote(csvURL.path)
+        let datasetReference = shellQuote(components.datasetReference)
+        let tableReference = shellQuote(components.tableReference)
+        let project = shellQuote(components.project)
+        let dataset = shellQuote(components.dataset)
+        let table = shellQuote(components.table)
 
-        for path in candidates {
-            if FileManager.default.isExecutableFile(atPath: path) {
-                return path
-            }
-        }
-
-        return resolveFromPATH(executable: "python3")
-    }
-
-    private static func resolveUploadCommand(environment: inout [String: String]) -> UploadCommand? {
-        #if DEBUG
-        if let devUploadRepoPath = resolveDevUploadRepoPath(),
-           let pythonPath = findPythonExecutable() {
-            let existingPythonPath = environment["PYTHONPATH"] ?? ""
-            environment["PYTHONPATH"] = existingPythonPath.isEmpty
-                ? devUploadRepoPath
-                : "\(devUploadRepoPath):\(existingPythonPath)"
-
-            return UploadCommand(
-                executable: pythonPath,
-                prefixArguments: ["-m", devUploadModule]
-            )
-        }
-        #endif
-
-        guard let uploadPath = findUploadExecutable() else { return nil }
-        return UploadCommand(executable: uploadPath, prefixArguments: [])
-    }
-
-    static func findBQExecutable() -> String? {
-        let candidates = [
-            ProcessInfo.processInfo.environment["BQ_PATH"],
-            "/opt/homebrew/bin/bq",
-            "/usr/local/bin/bq",
-            "\(NSHomeDirectory())/google-cloud-sdk/bin/bq",
-            "\(NSHomeDirectory())/Downloads/google-cloud-sdk/bin/bq",
-        ].compactMap { $0 }
-
-        for path in candidates {
-            if FileManager.default.isExecutableFile(atPath: path) {
-                return path
-            }
-        }
-
-        return resolveFromPATH(executable: "bq")
-    }
-
-    private static func resolveFromPATH(executable: String) -> String? {
-        let process = Process()
-        process.executableURL = URL(fileURLWithPath: "/usr/bin/which")
-        process.arguments = [executable]
-        process.environment = enrichedEnvironment()
-
-        let pipe = Pipe()
-        process.standardOutput = pipe
-        process.standardError = Pipe()
-
-        do {
-            try process.run()
-            process.waitUntilExit()
-            guard process.terminationStatus == 0 else { return nil }
-            let data = pipe.fileHandleForReading.readDataToEndOfFile()
-            let path = String(data: data, encoding: .utf8)?
-                .trimmingCharacters(in: .whitespacesAndNewlines)
-            guard let path, !path.isEmpty, FileManager.default.isExecutableFile(atPath: path) else {
-                return nil
-            }
-            return path
-        } catch {
-            return nil
-        }
-    }
-
-    private static func enrichedEnvironment() -> [String: String] {
-        var environment = ProcessInfo.processInfo.environment
-        let extraPaths = [
-            "\(NSHomeDirectory())/.pyenv/shims",
-            "/opt/homebrew/bin",
-            "/usr/local/bin",
-            "\(NSHomeDirectory())/google-cloud-sdk/bin",
-            "\(NSHomeDirectory())/Downloads/google-cloud-sdk/bin",
-        ]
-        let path = environment["PATH"] ?? "/usr/bin:/bin:/usr/sbin:/sbin"
-        environment["PATH"] = (extraPaths + [path]).joined(separator: ":")
-        return environment
-    }
-
-    private static func runCommand(
-        executable: String,
-        arguments: [String],
-        environment: [String: String]
-    ) throws -> (status: Int32, output: String) {
-        let process = Process()
-        process.executableURL = URL(fileURLWithPath: executable)
-        process.arguments = arguments
-        process.environment = environment
-
-        let outputPipe = Pipe()
-        let errorPipe = Pipe()
-        process.standardOutput = outputPipe
-        process.standardError = errorPipe
-
-        try process.run()
-        process.waitUntilExit()
-
-        let stdout = String(data: outputPipe.fileHandleForReading.readDataToEndOfFile(), encoding: .utf8) ?? ""
-        let stderr = String(data: errorPipe.fileHandleForReading.readDataToEndOfFile(), encoding: .utf8) ?? ""
-        let combined = [stdout, stderr]
-            .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
-            .filter { !$0.isEmpty }
-            .joined(separator: "\n")
-
-        return (process.terminationStatus, combined)
-    }
-
-    private static func bqObjectExists(
-        executable: String,
-        reference: String,
-        environment: [String: String]
-    ) -> Bool {
-        guard let result = try? runCommand(
-            executable: executable,
-            arguments: ["show", reference],
-            environment: environment
-        ) else {
-            return false
-        }
-        return result.status == 0
+        return """
+        set -e
+        command -v bq >/dev/null 2>&1 || { echo "BQ_NOT_FOUND"; exit 127; }
+        command -v \(shellQuote(uploadCommand.cliName)) >/dev/null 2>&1 || { echo "UPLOAD_CLI_NOT_FOUND"; exit 127; }
+        if ! bq show \(datasetReference) >/dev/null 2>&1; then
+          bq mk -d \(datasetReference)
+        fi
+        replace_flag=""
+        if bq show \(tableReference) >/dev/null 2>&1; then
+          replace_flag="--replace"
+        fi
+        \(uploadCLI) \(csvPath) --project \(project) --dataset \(dataset) --table \(table) --output json "$replace_flag"
+        """
     }
 
     private static func parseUploadResponse(_ output: String) -> UploadResult? {
@@ -256,52 +295,26 @@ struct BQUploadService {
     }
 
     static func upload(csvURL: URL, tableReference: String) async throws -> UploadResult {
-        let bqPath = findBQExecutable()
-        guard let bqPath else { throw BQUploadError.bqNotFound }
-
         let components = try parseTableComponents(tableReference)
-        var environment = enrichedEnvironment()
-        guard let uploadCommand = resolveUploadCommand(environment: &environment) else {
+        var environment = toolEnvironment()
+        let uploadCommand = resolveUploadCommand(environment: &environment)
+
+        let script = buildUploadScript(
+            csvURL: csvURL,
+            components: components,
+            uploadCommand: uploadCommand
+        )
+
+        let uploadResult = try runShell(script, environment: environment)
+
+        switch uploadResult.output {
+        case "BQ_NOT_FOUND":
+            throw BQUploadError.bqNotFound
+        case "UPLOAD_CLI_NOT_FOUND":
             throw BQUploadError.uploadCLINotFound
+        default:
+            break
         }
-
-        if !bqObjectExists(executable: bqPath, reference: components.datasetReference, environment: environment) {
-            let result = try runCommand(
-                executable: bqPath,
-                arguments: ["mk", "-d", components.datasetReference],
-                environment: environment
-            )
-            guard result.status == 0 else {
-                throw BQUploadError.uploadFailed(
-                    result.output.isEmpty
-                        ? "Failed to create dataset \(components.dataset)."
-                        : result.output
-                )
-            }
-        }
-
-        let tableExists = bqObjectExists(
-            executable: bqPath,
-            reference: components.tableReference,
-            environment: environment
-        )
-
-        var uploadArguments = [
-            csvURL.path,
-            "--project", components.project,
-            "--dataset", components.dataset,
-            "--table", components.table,
-            "--output", "json",
-        ]
-        if tableExists {
-            uploadArguments.append("--replace")
-        }
-
-        let uploadResult = try runCommand(
-            executable: uploadCommand.executable,
-            arguments: uploadCommand.prefixArguments + uploadArguments,
-            environment: environment
-        )
 
         if let parsed = parseUploadResponse(uploadResult.output) {
             return parsed

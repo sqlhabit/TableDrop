@@ -158,9 +158,16 @@ struct ContentView: View {
         VStack(alignment: .leading, spacing: 8) {
             if let uploadResult {
                 if uploadResult.succeeded {
-                    Text("🟢 Your upload was successful.")
-                        .font(.caption)
-                        .foregroundStyle(.secondary)
+                    VStack(alignment: .leading, spacing: 8) {
+                        Text("🟢 Your upload was successful.")
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+
+                        if let sampleQuery = uploadResult.sampleQuery {
+                            SQLQueryView(query: sampleQuery)
+                                .padding(.top, 12)
+                        }
+                    }
                 } else {
                     uploadErrorView(
                         message: "🔴 There was an error during the upload.",
@@ -318,7 +325,8 @@ struct ContentView: View {
                 await MainActor.run {
                     uploadResult = BQUploadService.UploadResult(
                         succeeded: false,
-                        log: error.localizedDescription
+                        log: error.localizedDescription,
+                        sampleQuery: nil
                     )
                     statusMessage = ""
                     statusIsError = false

@@ -28,6 +28,7 @@ struct BQUploadService {
     struct UploadResult {
         let succeeded: Bool
         let log: String?
+        let sampleQuery: String?
     }
 
     private struct UploadCommand {
@@ -511,9 +512,12 @@ struct BQUploadService {
         }
 
         let log = (json["log"] as? String)?.trimmingCharacters(in: .whitespacesAndNewlines)
+        let sampleQuery = (json["sample_query"] as? String)?
+            .trimmingCharacters(in: .whitespacesAndNewlines)
         return UploadResult(
             succeeded: status == "success",
-            log: log?.isEmpty == false ? log : nil
+            log: log?.isEmpty == false ? log : nil,
+            sampleQuery: sampleQuery?.isEmpty == false ? sampleQuery : nil
         )
     }
 
@@ -555,6 +559,6 @@ struct BQUploadService {
             throw BQUploadError.uploadFailed(message)
         }
 
-        return UploadResult(succeeded: true, log: nil)
+        return UploadResult(succeeded: true, log: nil, sampleQuery: nil)
     }
 }
